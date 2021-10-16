@@ -1,0 +1,66 @@
+- hosts: all
+  tasks:
+  - name: Reset all kubeadm state
+    become: true
+    command: kubeadm reset -f
+
+  # not sure what the actual issue is here, need to investigate deeper
+  #- name: Reinstall docker and friends
+  #  shell: "{{ item }}"
+  #  args:
+  #    warn: false
+  #  with_items:
+  #     - apt-get -y remove --purge docker-ce docker-ce-rootless-extras  docker-ce-cli containerd.io
+  #     - apt autoremove
+  #     - apt-get -y install docker-ce docker-ce-cli docker-ce-rootless-extras containerd.io
+
+- hosts: master
+  vars:
+    pod_cidr: "10.217.0.0/16"
+    kubeproxyfree: "disabled"
+    mode: "directrouting"
+    encryption: "no"
+    mizar_version: "0.8"
+    host_routing: "legacy"
+
+  tasks:
+  - name: Initialize the Kubernetes cluster with kube-proxy
+    become: true
+    command: kubeadm init --pod-network-cidr={{ pod_cidr }} --apiserver-advertise-address={{ node_ip }} --apiserver-cert-extra-sans={{ node_ip }}
+    when: (kubeproxyfree is defined and kubeproxyfree == "disabled")
+
+  - name: Initialize the Kubernetes cluster without kube-proxy
+    become: true
+    command: kubeadm init --pod-network-cidr={{ pod_cidr }} --skip-phases=addon/kube-proxy --apiserver-advertise-address={{ node_ip }} --apiserver-cert-extra-sans={{ node_ip }}
+    when: kubeproxyfree is not defined or kubeproxyfree != "disabled"
+
+  - name: Setup kubeconfig
+    command: "{{ item }}"
+    with_items:
+     - mkdir -p "$HOME/.kube"
+     - sudo cp /etc/kubernetes/admin.conf "$HOME/.kube/config"
+     - sudo chown "{{ ansible_user }}:{{ ansible_user }}" "$HOME/.kube/config"
+
+  - name: Install Mizar
+    shell:
+      kubectl apply -f https://raw.githubusercontent.com/CentaurusInfra/mizar/dev-next/etc/deploy/deploy.mizar.yaml
+    when: mode == "directrouting" and encryption == "no" and mizar_version.startswith("0.8")
+
+  - name: Generate the kubeadm join command
+    command: kubeadm token create --print-join-command
+    register: join_command
+
+  - name: Copy the kubeadm join command to a local file
+    local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./join-command"
+
+  - name: Allow scheduling pods on the control-plane node
+    command: kubectl taint nodes {{ master }} node-role.kubernetes.io/master-
+
+- hosts: nodes
+  become: true
+  tasks:
+  - name: Copy the kubadm join command to the node
+    copy: src=join-command dest=/tmp/join-command.sh mode=0777
+
+  - name: Join the node to the cluster
+    command: sh /tmp/join-command.sh

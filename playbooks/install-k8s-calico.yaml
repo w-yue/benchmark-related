@@ -1,0 +1,101 @@
+# 1st approach: https://docs.projectcalico.org/getting-started/kubernetes/quickstart
+#  kubectl create -f https://docs.projectcalico.org/manifests/tigera-operator.yaml
+#  kubectl create -f https://docs.projectcalico.org/manifests/custom-resources.yaml
+#  Change pod CIDR in custom-resources
+#  iptables --policy FORWARD ACCEPT
+# (works)
+#
+
+- hosts: all
+  tasks:
+  - name: Reset all kubeadm state
+    become: true
+    command: kubeadm reset -f
+
+- hosts: master
+  vars:
+    pod_cidr: "10.217.0.0/16"
+    mode: "tunneling"
+    datapath: "default"
+
+  tasks:
+  - name: Initialize the Kubernetes cluster with kube-proxy
+    become: true
+    command: kubeadm init --pod-network-cidr={{ pod_cidr }}  --apiserver-advertise-address={{ node_ip }} --apiserver-cert-extra-sans={{ node_ip }}
+
+  - name: Setup kubeconfig
+    command: "{{ item }}"
+    with_items:
+     - mkdir -p "$HOME/.kube"
+     - sudo cp /etc/kubernetes/admin.conf "$HOME/.kube/config"
+     - sudo chown "{{ ansible_user }}:{{ ansible_user }}" "$HOME/.kube/config"
+
+  # tigera-operator.yaml is from Calico v3.17.3
+  - name: Copy the tigera-operator yaml
+    ansible.builtin.copy:
+      src: tigera-operator.yaml
+      dest: ./tigera-operator.yaml
+
+  - name: Copy the custom-resources yaml
+    ansible.builtin.copy:
+      src: custom-resources.yaml
+      dest: ./custom-resources.yaml
+
+  - name: Patch calico files
+    shell: |
+      PODCIDR="{{ pod_cidr }}"
+      sed -i.orig -e "s!cidr: 192.168.0.0/16!cidr: $PODCIDR!" custom-resources.yaml
+      echo '    nodeAddressAutodetectionV4:' >> custom-resources.yaml
+      echo '      interface: "enp10.*"' >> custom-resources.yaml
+
+  - name: Configure calico to always use VXLAN
+    shell: |
+      sed -i.orig -e "s/encapsulation:.*$/encapsulation: VXLAN/" custom-resources.yaml
+    when: mode == "tunneling"
+
+  - name: Install Calico
+    shell: |
+      kubectl apply -f tigera-operator.yaml
+      kubectl apply -f custom-resources.yaml
+
+  - name: Copy the tigera-operator-k8s-svc yaml
+    ansible.builtin.copy:
+      src: tigera-operator-k8s-svc.yaml
+      dest: ./tigera-operator-k8s-svc.yaml
+    when: datapath == "bpf"
+
+  - name: Configure calico to use BPF datapath
+    shell: |
+      kubectl -n tigera-operator apply -f ./tigera-operator-k8s-svc.yaml
+      sleep 60
+      kubectl delete pod -n tigera-operator -l k8s-app=tigera-operator
+      kubectl patch ds -n kube-system kube-proxy -p '{ "spec": { "template": { "spec": { "nodeSelector": { "non-calico": "true"} } } } }'
+      curl -O -L  https://github.com/projectcalico/calicoctl/releases/download/v3.17.3/calicoctl
+      chmod +x calicoctl
+      ./calicoctl patch felixconfiguration default --patch '{ "spec": { "bpfEnabled": true} }'
+      ./calicoctl patch felixconfiguration default --patch '{ "spec": { "bpfExternalServiceMode": "DSR"} }'
+      ./calicoctl patch felixconfiguration default --patch '{ "spec": { "routeSource": "WorkloadIPs"} }'
+      ./calicoctl patch felixconfiguration default --patch '{ "spec": { "vxlanEnabled": false} }'
+    when: datapath == "bpf"
+
+  - name: Generate the kubeadm join command
+    command: kubeadm token create --print-join-command
+    register: join_command
+
+  - name: Copy the kubeadm join command to a local file
+    local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./join-command"
+
+  - name: Allow scheduling pods on the control-plane node
+    command: kubectl taint nodes {{ master }} node-role.kubernetes.io/master-
+
+- hosts: nodes
+  become: true
+  tasks:
+  - name: Copy the kubadm join command to the node
+    copy: src=join-command dest=/tmp/join-command.sh mode=0777
+
+  - name: Join the node to the cluster
+    command: sh /tmp/join-command.sh
+
+
+# 2nd approach: https://docs.projectcalico.org/getting-started/kubernetes/self-managed-onprem/onpremises#install-calico-with-kubernetes-api-datastore-50-nodes-or-less (IPIP by default)

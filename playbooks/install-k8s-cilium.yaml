@@ -1,0 +1,191 @@
+- hosts: all
+  tasks:
+  - name: Reset all kubeadm state
+    become: true
+    command: kubeadm reset -f
+
+  # not sure what the actual issue is here, need to investigate deeper
+  #- name: Reinstall docker and friends
+  #  shell: "{{ item }}"
+  #  args:
+  #    warn: false
+  #  with_items:
+  #     - apt-get -y remove --purge docker-ce docker-ce-rootless-extras  docker-ce-cli containerd.io
+  #     - apt autoremove
+  #     - apt-get -y install docker-ce docker-ce-cli docker-ce-rootless-extras containerd.io
+
+- hosts: master
+  vars:
+    pod_cidr: "10.217.0.0/16"
+    kubeproxyfree: "strict"
+    mode: "directrouting"
+    encryption: "no"
+    cilium_version: "1.9"
+    host_routing: "legacy"
+    hubble: "false"
+
+  tasks:
+  - name: Initialize the Kubernetes cluster with kube-proxy
+    become: true
+    command: kubeadm init --pod-network-cidr={{ pod_cidr }}  --apiserver-advertise-address={{ node_ip }} --apiserver-cert-extra-sans={{ node_ip }}
+    when: (kubeproxyfree is defined and kubeproxyfree == "disabled") or encryption == "ipsec"
+
+  - name: Initialize the Kubernetes cluster without kube-proxy
+    become: true
+    command: kubeadm init --pod-network-cidr={{ pod_cidr }} --skip-phases=addon/kube-proxy --apiserver-advertise-address={{ node_ip }} --apiserver-cert-extra-sans={{ node_ip }}
+    when: kubeproxyfree is not defined or kubeproxyfree != "disabled"
+
+  - name: Setup kubeconfig
+    command: "{{ item }}"
+    with_items:
+     - mkdir -p "$HOME/.kube"
+     - sudo cp /etc/kubernetes/admin.conf "$HOME/.kube/config"
+     - sudo chown "{{ ansible_user }}:{{ ansible_user }}" "$HOME/.kube/config"
+
+  - name: Install Cilium in direct-routing mode
+    script: >
+       ../scripts/cilium-install-with-helm.sh {{ cilium_version }}
+       --namespace kube-system
+       --set k8sServiceHost={{ node_ip }}
+       --set k8sServicePort=6443
+       --set ipam.mode=kubernetes
+       --set kubeProxyReplacement={{ kubeproxyfree | default("strict") }}
+       --set nativeRoutingCIDR={{ pod_cidr }}
+       --set autoDirectNodeRoutes=true
+       --set loadBalancer.acceleration=native
+       --set loadBalancer.mode=hybrid
+       --set devices=eth3
+       --set tunnel=disabled
+       --set bpf.hostRouting={{ "true" if host_routing == "legacy" else "false" }}
+       --set hubble.enabled={{ hubble }}
+    when: mode == "directroutingwithxdp" and encryption == "no" and not cilium_version.startswith("1.8")
+
+  - name: Install Cilium in direct-routing mode
+    script: >
+       ../scripts/cilium-install-with-helm.sh {{ cilium_version }}
+       --namespace kube-system
+       --set k8sServiceHost={{ node_ip }}
+       --set k8sServicePort=6443
+       --set ipam.mode=kubernetes
+       --set kubeProxyReplacement={{ kubeproxyfree | default("strict") }}
+       --set nativeRoutingCIDR={{ pod_cidr }}
+       --set autoDirectNodeRoutes=true
+       --set tunnel=disabled
+       --set bpf.hostRouting={{ "true" if host_routing == "legacy" else "false" }}
+       --set hubble.enabled={{ hubble }}
+    when: mode == "directrouting" and encryption == "no" and not cilium_version.startswith("1.8")
+
+  - name: Install Cilium in direct-routing mode
+    script: >
+       ../scripts/cilium-install-with-helm.sh {{ cilium_version }}
+       --namespace kube-system
+       --set global.k8sServiceHost={{ node_ip }}
+       --set global.k8sServicePort=6443
+       --set config.ipam=kubernetes
+       --set config.blacklistConflictingRoutes=false
+       --set global.kubeProxyReplacement={{ kubeproxyfree | default("strict") }}
+       --set global.nativeRoutingCIDR={{ pod_cidr }}
+       --set global.autoDirectNodeRoutes=true
+       --set global.tunnel=disabled
+       --set global.hubble.enabled={{ hubble }}
+    when: mode == "directrouting" and encryption == "no" and cilium_version.startswith("1.8")
+
+  - name: Install Cilium in VXLAN tunneling mode
+    script: >
+       ../scripts/cilium-install-with-helm.sh {{ cilium_version }}
+       --namespace kube-system
+       --set k8sServiceHost={{ node_ip }}
+       --set k8sServicePort=6443
+       --set ipam.mode=kubernetes
+       --set kubeProxyReplacement={{ kubeproxyfree | default("strict") }}
+       --set bpf.hostRouting={{ "true" if host_routing == "legacy" else "false" }}
+       --set hubble.enabled={{ hubble }}
+    when: mode == "tunneling" and encryption == "no" and not cilium_version.startswith("1.8")
+
+  - name: Install Cilium in VXLAN tunneling mode
+    script: >
+      ../scripts/cilium-install-with-helm.sh {{ cilium_version }}
+      --namespace kube-system
+      --set global.k8sServiceHost={{ node_ip }}
+      --set global.k8sServicePort=6443
+      --set config.ipam=kubernetes
+      --set config.blacklistConflictingRoutes=false
+      --set global.kubeProxyReplacement={{ kubeproxyfree | default("strict") }}
+      --set global.hubble.enabled={{ hubble }}
+    when: mode == "tunneling" and encryption == "no" and cilium_version.startswith("1.8")
+
+  - name: Generate keys
+    script: ../scripts/cilium-gen-keys.sh
+    when: encryption == "ipsec"
+
+  # TODO: fix hardcoding of interface here
+  - name: Install Cilium using IPSec Encryption in direct routing mode
+    script: >
+      ../scripts/cilium-install-with-helm.sh {{ cilium_version }}
+      --namespace kube-system
+      --set k8sServiceHost={{ node_ip }}
+      --set k8sServicePort=6443
+      --set ipam.mode=kubernetes
+      --set kubeProxyReplacement=disabled
+      --set nativeRoutingCIDR={{ pod_cidr }}
+      --set autoDirectNodeRoutes=true
+      --set tunnel=disabled
+      --set hubble.enabled={{ hubble }}
+      --set encryption.enabled=true
+      --set encryption.nodeEncryption=false
+      --set encryption.interface=enp10s0f0
+    when: encryption == "ipsec" and mode == "directrouting" and not cilium_version.startswith("1.8")
+
+  # TODO: fix hardcoding of interface here
+  - name: Install Cilium using Encryption (routing mode)
+    script: >
+      ../scripts/cilium-install-with-helm.sh {{ cilium_version }}
+      --namespace kube-system
+      --set global.k8sServiceHost={{ node_ip }}
+      --set global.k8sServicePort=6443
+      --set config.ipam=kubernetes
+      --set config.blacklistConflictingRoutes=false
+      --set global.kubeProxyReplacement=disabled
+      --set global.nativeRoutingCIDR={{ pod_cidr }}
+      --set global.autoDirectNodeRoutes=true
+      --set global.encryption.enabled=true
+      --set global.encryption.nodeEncryption=false
+      --set global.encryption.interface=enp10s0f1
+    when: encryption == "yes" and mode == "directrouting" and cilium_version.startswith("1.8")
+
+  # TODO: fix hardcoding of interface here
+  - name: Install Cilium using Wireguard Encryption in direct routing mode
+    script: >
+      ../scripts/cilium-install-with-helm.sh {{ cilium_version }}
+      --namespace kube-system
+      --set k8sServiceHost={{ node_ip }}
+      --set k8sServicePort=6443
+      --set ipam.mode=kubernetes
+      --set kubeProxyReplacement={{ kubeproxyfree | default("strict") }}
+      --set nativeRoutingCIDR={{ pod_cidr }}
+      --set autoDirectNodeRoutes=true
+      --set tunnel=disabled
+      --set hubble.enabled={{ hubble }}
+      --set encryption.enabled=true
+      --set encryption.type=wireguard
+      --set l7Proxy=false
+    when: encryption == "wireguard" and mode == "directrouting" and not cilium_version.startswith("1.8")
+
+  - name: Generate the kubeadm join command
+    command: kubeadm token create --print-join-command
+    register: join_command
+
+  - name: Copy the kubeadm join command to a local file
+    local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./join-command"
+
+  - name: Allow scheduling pods on the control-plane node
+    command: kubectl taint nodes {{ master }} node-role.kubernetes.io/master-
+
+- hosts: nodes
+  become: true
+  tasks:
+  - name: Copy the kubadm join command to the node
+    copy: src=join-command dest=/tmp/join-command.sh mode=0777
+
+  - name: Join the node to the cluster
+    command: sh /tmp/join-command.sh

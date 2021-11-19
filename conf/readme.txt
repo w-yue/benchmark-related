@@ -16,15 +16,23 @@ steps:
 	ansible-playbook -e mode=tunneling -i conf/hosts.ini playbooks/install-k8s-cilium.yaml
 	ansible-playbook -e conf=vxlan -i conf/hosts.ini playbooks/run-kubenetbench.yaml
 
+    3.2 Native Routing with kube-proxy
+        ansible-playbook -e kubeproxyfree=disabled -e mode=directrouting -i conf/hosts.ini playbooks/install-k8s-cilium.yaml
+        ansible-playbook -e conf=routing -i conf/hosts.ini playbooks/run-kubenetbench.yaml
+
     3.2 Native Routing
 	ansible-playbook -e mode=directrouting -i conf/hosts.ini playbooks/install-k8s-cilium.yaml
 	ansible-playbook -e conf=routing -i conf/hosts.ini playbooks/run-kubenetbench.yaml
 
-    3.3 Encryption
+    3.3 Native Routing with xdp
+        ansible-playbook -e mode=directroutingwithxdp -i conf/hosts.ini playbooks/install-k8s-cilium.yaml
+        ansible-playbook -e conf=routing -i conf/hosts.ini playbooks/run-kubenetbench.yaml
+
+    3.4 Encryption
 	ansible-playbook -e kubeproxyfree=disabled -e mode=directrouting -e encryption=yes -i conf/hosts.ini playbooks/install-k8s-cilium.yaml
 	ansible-playbook -e conf=encryption-routing -i conf/hosts.ini playbooks/run-kubenetbench.yaml
 
-    3.4 Baseline
+    3.5 Baseline
 	ansible-playbook -i conf/hosts.ini playbooks/reset-kubeadm.yaml
 	ansible-playbook -i conf/hosts.ini playbooks/run-rawnetperf.yaml
 

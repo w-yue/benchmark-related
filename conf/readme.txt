@@ -3,7 +3,7 @@ I first setup and run slightly modified cilium benchmark locally
 #https://docs.cilium.io/en/latest/operations/performance/benchmark/#test-configurations
 steps:
 1. setup test environment
-    create packet-hosts.ini
+    create hosts.ini
 2. install required software
     2.1 install netperf
 	ansible-playbook -i conf/hosts.ini playbooks/install-misc.yaml
